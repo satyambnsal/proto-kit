@@ -20,11 +20,11 @@ export class RuntimeMethodExecution {
     private readonly executionContext: RuntimeMethodExecutionContext
   ) {}
 
-  private executeMethodWithKeys(
-    method: () => void,
+  private async executeMethodWithKeys(
+    method: () => Promise<unknown>,
     contextInputs: RuntimeMethodExecutionData,
     parentStateService: CachedStateService
-  ): StateTransition<unknown>[] {
+  ): Promise<StateTransition<unknown>[]> {
     const { executionContext, runtime, protocol } = this;
 
     executionContext.setup(contextInputs);
@@ -35,7 +35,7 @@ export class RuntimeMethodExecution {
     protocol.stateServiceProvider.setCurrentStateService(stateService);
 
     // Execute method
-    method();
+    await method();
 
     const { stateTransitions } = executionContext.current().result;
 
@@ -56,8 +56,9 @@ export class RuntimeMethodExecution {
    * where for every i-th iteration, we collect the i-th ST that has
    * been emitted and preload the corresponding key.
    */
+
   public async simulateMultiRound(
-    method: () => void,
+    method: () => Promise<unknown>,
     contextInputs: RuntimeMethodExecutionData,
     parentStateService: AsyncStateService
   ): Promise<StateTransition<unknown>[]> {
@@ -70,9 +71,9 @@ export class RuntimeMethodExecution {
 
     const preloadingStateService = new CachedStateService(parentStateService);
 
+    /* eslint-disable no-await-in-loop */
     do {
-      // eslint-disable-next-line no-await-in-loop
-      const stateTransitions = this.executeMethodWithKeys(
+      const stateTransitions = await this.executeMethodWithKeys(
         method,
         contextInputs,
         preloadingStateService
@@ -95,7 +96,7 @@ export class RuntimeMethodExecution {
         await optimisticRunStateService.preloadKeys(
           keys.map((fieldString) => Field(fieldString))
         );
-        const stateTransitionsFullRun = this.executeMethodWithKeys(
+        const stateTransitionsFullRun = await this.executeMethodWithKeys(
           method,
           contextInputs,
           optimisticRunStateService
@@ -111,24 +112,25 @@ export class RuntimeMethodExecution {
         if (firstDiffIndex === -1) {
           // Abort bcs no dynamic keys are used => use then 1:1
           return stateTransitionsFullRun;
-        } else {
-          // here push all known keys up to the first dynamic key
-          // touchedkeys is empty, so we don't care about that
-          const additionalKeys = stateTransitionsFullRun
-            .slice(0, firstDiffIndex)
-            .map((st) => st.path.toString())
-            .filter(distinctByString);
-
-          // Preload eligible keys
-          touchedKeys.push(...additionalKeys);
-          await preloadingStateService.preloadKeys(
-            additionalKeys.map((key) => Field(key))
-          );
-
-          collectedSTs = firstDiffIndex - 1;
-          lastRuntimeResult = stateTransitions;
-          continue;
         }
+        // here push all known keys up to the first dynamic key
+        // touchedkeys is empty, so we don't care about that
+        const additionalKeys = stateTransitionsFullRun
+          .slice(0, firstDiffIndex)
+          .map((st) => st.path.toString())
+          .filter(distinctByString);
+
+        // Preload eligible keys
+        touchedKeys.push(...additionalKeys);
+
+        await preloadingStateService.preloadKeys(
+          additionalKeys.map((key) => Field(key))
+        );
+
+        collectedSTs = firstDiffIndex - 1;
+        lastRuntimeResult = stateTransitions;
+        // eslint-disable-next-line no-continue
+        continue;
       }
 
       const latestST = stateTransitions.at(collectedSTs);
@@ -138,6 +140,7 @@ export class RuntimeMethodExecution {
         !touchedKeys.includes(latestST.path.toString())
       ) {
         touchedKeys.push(latestST.path.toString());
+
         await preloadingStateService.preloadKey(latestST.path);
       }
 
@@ -145,6 +148,8 @@ export class RuntimeMethodExecution {
 
       lastRuntimeResult = stateTransitions;
     } while (collectedSTs < numberMethodSTs);
+
+    /* eslint-enable no-await-in-loop */
 
     return lastRuntimeResult;
   }

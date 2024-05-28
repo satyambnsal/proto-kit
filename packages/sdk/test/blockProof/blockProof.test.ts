@@ -1,5 +1,10 @@
-import { expectDefined } from "@proto-kit/common";
-import { Field, PrivateKey, UInt64 as O1UInt64 } from "o1js";
+import {
+  expectDefined,
+  MockAsyncMerkleTreeStore,
+  RollupMerkleTree,
+  mapSequential,
+} from "@proto-kit/common";
+import { Field, PrivateKey, UInt64 as O1UInt64, Signature } from "o1js";
 import {
   BlockProverPublicOutput,
   NetworkState,
@@ -8,18 +13,16 @@ import {
   RuntimeTransaction,
   StateServiceProvider,
 } from "@proto-kit/protocol";
-
-import { TestingAppChain } from "../../src/appChain/TestingAppChain";
-
-import { TestBalances } from "./TestBalances";
-import { MockAsyncMerkleTreeStore, RollupMerkleTree } from "@proto-kit/common";
 import { ManualBlockTrigger } from "@proto-kit/sequencer";
 import { InMemoryStateService } from "@proto-kit/module";
 import { BalancesKey, TokenId, UInt64 } from "@proto-kit/library";
 
+import { TestingAppChain } from "../../src/appChain/TestingAppChain";
+
+import { TestBalances } from "./TestBalances";
+
 // Failing - investigate why
 describe.skip("blockProof", () => {
-  // eslint-disable-next-line max-statements
   it("should transition block state hash", async () => {
     expect.assertions(3);
 
@@ -51,8 +54,8 @@ describe.skip("blockProof", () => {
 
     const tokenId = TokenId.from(0);
 
-    const tx1 = await appChain.transaction(alice, () => {
-      balances.setBalance(tokenId, alice, UInt64.from(1000));
+    const tx1 = await appChain.transaction(alice, async () => {
+      await balances.setBalance(tokenId, alice, UInt64.from(1000));
     });
 
     const context = appChain.runtime.dependencyContainer.resolve(
@@ -79,21 +82,23 @@ describe.skip("blockProof", () => {
       "setBalance"
     );
 
-    // eslint-disable-next-line max-len
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/consistent-type-assertions
-    appChain.protocol.dependencyContainer
-      .resolveAll<ProvableTransactionHook>("ProvableTransactionHook")
-      .map((hook) => {
-        hook.onTransaction({
-          transaction: RuntimeTransaction.fromTransaction({
-            sender: alice,
-            nonce: O1UInt64.from(0),
-            methodId: Field(balancesMethodId),
-            argsHash: Field(0),
-          }),
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any);
+    const txHooks =
+      appChain.protocol.dependencyContainer.resolveAll<ProvableTransactionHook>(
+        "ProvableTransactionHook"
+      );
+
+    await mapSequential(txHooks, async (hook) => {
+      await hook.onTransaction({
+        transaction: RuntimeTransaction.fromTransaction({
+          sender: alice,
+          nonce: O1UInt64.from(0),
+          methodId: Field(balancesMethodId),
+          argsHash: Field(0),
+        }),
+        networkState: NetworkState.empty(),
+        signature: Signature.create(PrivateKey.random(), [Field(0)]),
       });
+    });
 
     const protocolSTs = context.current().result.stateTransitions;
 

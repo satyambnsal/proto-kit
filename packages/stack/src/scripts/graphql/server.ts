@@ -22,7 +22,7 @@ import {
   VanillaRuntimeModules,
   UInt64,
 } from "@proto-kit/library";
-import { log, Presets } from "@proto-kit/common";
+import { log } from "@proto-kit/common";
 import {
   BlockProducerModule,
   InMemoryDatabase,
@@ -58,12 +58,19 @@ export class TestBalances extends Balances {
   @state() public totalSupply = State.from<UInt64>(UInt64);
 
   @runtimeMethod()
-  public getBalance(tokenId: TokenId, address: PublicKey): Balance {
+  public async getBalanceForUser(
+    tokenId: TokenId,
+    address: PublicKey
+  ): Promise<Balance> {
     return super.getBalance(tokenId, address);
   }
 
   @runtimeMethod()
-  public addBalance(tokenId: TokenId, address: PublicKey, balance: UInt64) {
+  public async addBalance(
+    tokenId: TokenId,
+    address: PublicKey,
+    balance: UInt64
+  ) {
     const totalSupply = this.totalSupply.get();
     this.totalSupply.set(totalSupply.orElse(UInt64.zero).add(balance));
 
@@ -226,9 +233,9 @@ export async function startServer() {
   });
 
   await appChain.start(container.createChildContainer());
-  const pk = PublicKey.fromBase58(
-    "B62qmETai5Y8vvrmWSU8F4NX7pTyPqYLMhc1pgX3wD8dGc2wbCWUcqP"
-  );
+  // const pk = PublicKey.fromBase58(
+  //   "B62qmETai5Y8vvrmWSU8F4NX7pTyPqYLMhc1pgX3wD8dGc2wbCWUcqP"
+  // );
 
   const balances = appChain.runtime.resolve("Balances");
 
@@ -245,8 +252,8 @@ export async function startServer() {
 
   const tx = await appChain.transaction(
     priv.toPublicKey(),
-    () => {
-      balances.addBalance(tokenId, priv.toPublicKey(), UInt64.from(1000));
+    async () => {
+      await balances.addBalance(tokenId, priv.toPublicKey(), UInt64.from(1000));
     },
     {
       nonce,
@@ -258,8 +265,8 @@ export async function startServer() {
 
   const tx2 = await appChain.transaction(
     priv.toPublicKey(),
-    () => {
-      balances.addBalance(tokenId, priv.toPublicKey(), UInt64.from(1000));
+    async () => {
+      await balances.addBalance(tokenId, priv.toPublicKey(), UInt64.from(1000));
     },
     { nonce: nonce + 1 }
   );

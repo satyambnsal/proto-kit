@@ -1,4 +1,10 @@
 import "reflect-metadata";
+import { container } from "tsyringe";
+import {
+  RuntimeMethodExecutionContext,
+  RuntimeTransaction,
+  NetworkState,
+} from "@proto-kit/protocol";
 
 import { MethodIdResolver } from "../src";
 
@@ -33,7 +39,25 @@ describe("runtime", () => {
       .getMethodId(moduleName, methodName);
     const method = runtime.getMethodById(methodId);
 
-    // eslint-disable-next-line jest/no-restricted-matchers
     expect(method).toBeDefined();
+  });
+
+  it("regression - check that analyzeMethods works on runtime", async () => {
+    const { runtime } = createTestingRuntime(
+      {
+        Balances,
+      },
+      {
+        Balances: {},
+      }
+    );
+
+    const context = container.resolve(RuntimeMethodExecutionContext);
+    context.setup({
+      transaction: RuntimeTransaction.dummyTransaction(),
+      networkState: NetworkState.empty(),
+    });
+
+    await runtime.zkProgrammable.zkProgram.analyzeMethods();
   });
 });

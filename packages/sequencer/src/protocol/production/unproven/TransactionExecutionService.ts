@@ -1,4 +1,3 @@
-/* eslint-disable max-lines */
 import { container, inject, injectable, Lifecycle, scoped } from "tsyringe";
 import {
   BlockProverExecutionData,
@@ -18,13 +17,17 @@ import {
   StateServiceProvider,
   MandatoryProtocolModulesRecord,
   BlockHashTreeEntry,
-  ACTIONS_EMPTY_HASH,
   MinaActions,
   MinaActionsHashList,
   reduceStateTransitions,
 } from "@proto-kit/protocol";
 import { Bool, Field, Poseidon } from "o1js";
-import { AreProofsEnabled, log, RollupMerkleTree } from "@proto-kit/common";
+import {
+  AreProofsEnabled,
+  log,
+  RollupMerkleTree,
+  mapSequential,
+} from "@proto-kit/common";
 import {
   MethodParameterEncoder,
   Runtime,
@@ -53,6 +56,8 @@ const errors = {
   methodIdNotFound: (methodId: string) =>
     new Error(`Can't find runtime method with id ${methodId}`),
 };
+
+export type SomeRuntimeMethod = (...args: unknown[]) => Promise<unknown>;
 
 @injectable()
 @scoped(Lifecycle.ContainerScoped)
@@ -107,11 +112,11 @@ export class TransactionExecutionService {
     );
   }
 
-  private decodeTransaction(tx: PendingTransaction): {
-    method: (...args: unknown[]) => unknown;
+  private async decodeTransaction(tx: PendingTransaction): Promise<{
+    method: SomeRuntimeMethod;
     args: unknown[];
     module: RuntimeModule<unknown>;
-  } {
+  }> {
     const methodDescriptors = this.runtime.methodIdResolver.getMethodNameFromId(
       tx.methodId.toBigInt()
     );
@@ -129,7 +134,7 @@ export class TransactionExecutionService {
       module,
       methodName
     );
-    const args = parameterDecoder.decode(tx.argsJSON);
+    const args = await parameterDecoder.decode(tx.argsJSON);
 
     return {
       method,
@@ -151,13 +156,15 @@ export class TransactionExecutionService {
     return appChain;
   }
 
-  private executeWithExecutionContext(
-    method: () => void,
+  private async executeWithExecutionContext(
+    method: () => Promise<void>,
     contextInputs: RuntimeMethodExecutionData,
     runSimulated = false
-  ): Pick<
-    RuntimeProvableMethodExecutionResult,
-    "stateTransitions" | "status" | "statusMessage"
+  ): Promise<
+    Pick<
+      RuntimeProvableMethodExecutionResult,
+      "stateTransitions" | "status" | "statusMessage"
+    >
   > {
     // Set up context
     const executionContext = container.resolve(RuntimeMethodExecutionContext);
@@ -165,7 +172,7 @@ export class TransactionExecutionService {
     executionContext.setSimulated(runSimulated);
 
     // Execute method
-    method();
+    await method();
 
     const { stateTransitions, status, statusMessage } =
       executionContext.current().result;
@@ -184,12 +191,12 @@ export class TransactionExecutionService {
   }
 
   private executeRuntimeMethod(
-    method: (...args: unknown[]) => unknown,
+    method: SomeRuntimeMethod,
     args: unknown[],
     contextInputs: RuntimeMethodExecutionData
   ) {
-    return this.executeWithExecutionContext(() => {
-      method(...args);
+    return this.executeWithExecutionContext(async () => {
+      await method(...args);
     }, contextInputs);
   }
 
@@ -199,9 +206,9 @@ export class TransactionExecutionService {
     runSimulated = false
   ) {
     return this.executeWithExecutionContext(
-      () => {
-        this.transactionHooks.forEach((transactionHook) => {
-          transactionHook.onTransaction(blockContextInputs);
+      async () => {
+        await mapSequential(this.transactionHooks, async (transactionHook) => {
+          await transactionHook.onTransaction(blockContextInputs);
         });
       },
       runtimeContextInputs,
@@ -234,9 +241,9 @@ export class TransactionExecutionService {
     );
 
     // Get used networkState by executing beforeBlock() hooks
-    const networkState = this.blockHooks.reduce<NetworkState>(
-      (reduceNetworkState, hook) =>
-        hook.beforeBlock(reduceNetworkState, {
+    const networkState = await this.blockHooks.reduce<Promise<NetworkState>>(
+      async (reduceNetworkState, hook) =>
+        await hook.beforeBlock(await reduceNetworkState, {
           blockHashRoot: Field(lastMetadata.blockHashRoot),
           eternalTransactionsHash: lastBlock.toEternalTransactionsHash,
           stateRoot: Field(lastMetadata.stateRoot),
@@ -244,10 +251,10 @@ export class TransactionExecutionService {
           networkStateHash: lastMetadata.afterNetworkState.hash(),
           incomingMessagesHash: lastBlock.toMessagesHash,
         }),
-      lastMetadata.afterNetworkState
+      Promise.resolve(lastMetadata.afterNetworkState)
     );
 
-    for (const [index, tx] of transactions.entries()) {
+    for (const [, tx] of transactions.entries()) {
       try {
         // Create execution trace
         // eslint-disable-next-line no-await-in-loop
@@ -373,9 +380,12 @@ export class TransactionExecutionService {
       transaction: RuntimeTransaction.dummyTransaction(),
     });
 
-    const resultingNetworkState = this.blockHooks.reduce<NetworkState>(
-      (networkState, hook) => hook.afterBlock(networkState, state),
-      block.networkState.during
+    const resultingNetworkState = await this.blockHooks.reduce<
+      Promise<NetworkState>
+    >(
+      async (networkState, hook) =>
+        await hook.afterBlock(await networkState, state),
+      Promise.resolve(block.networkState.during)
     );
 
     const { stateTransitions } = this.executionContext.result;
@@ -426,12 +436,11 @@ export class TransactionExecutionService {
     stateService.writeStates(writes);
   }
 
-  // eslint-disable-next-line no-warning-comments
   // TODO Here exists a edge-case, where the protocol hooks set
   // some state that is then consumed by the runtime and used as a key.
   // In this case, runtime would generate a wrong key here.
   private async extractAccessedKeys(
-    method: (...args: unknown[]) => unknown,
+    method: SomeRuntimeMethod,
     args: unknown[],
     runtimeContextInputs: RuntimeMethodExecutionData,
     blockContextInputs: BlockProverExecutionData,
@@ -440,12 +449,11 @@ export class TransactionExecutionService {
     runtimeKeys: Field[];
     protocolKeys: Field[];
   }> {
-    // eslint-disable-next-line no-warning-comments
     // TODO unsafe to re-use params here?
     const stateTransitions =
       await this.runtimeMethodExecution.simulateMultiRound(
-        () => {
-          method(...args);
+        async () => {
+          await method(...args);
         },
         runtimeContextInputs,
         parentStateService
@@ -453,10 +461,13 @@ export class TransactionExecutionService {
 
     const protocolTransitions =
       await this.runtimeMethodExecution.simulateMultiRound(
-        () => {
-          this.transactionHooks.forEach((transactionHook) => {
-            transactionHook.onTransaction(blockContextInputs);
-          });
+        async () => {
+          await mapSequential(
+            this.transactionHooks,
+            async (transactionHook) => {
+              await transactionHook.onTransaction(blockContextInputs);
+            }
+          );
         },
         runtimeContextInputs,
         parentStateService
@@ -471,7 +482,6 @@ export class TransactionExecutionService {
     };
   }
 
-  // eslint-disable-next-line max-statements
   private async createExecutionTrace(
     asyncStateService: AsyncStateService,
     tx: PendingTransaction,
@@ -479,7 +489,7 @@ export class TransactionExecutionService {
   ): Promise<TransactionExecutionResult> {
     const cachedStateService = new CachedStateService(asyncStateService);
 
-    const { method, args, module } = this.decodeTransaction(tx);
+    const { method, args, module } = await this.decodeTransaction(tx);
 
     // Disable proof generation for tracing
     const appChain = this.getAppChainForModule(module);
@@ -514,7 +524,7 @@ export class TransactionExecutionService {
     // generate and apply the correct STs with the right values
     this.stateServiceProvider.setCurrentStateService(cachedStateService);
 
-    const protocolResult = this.executeProtocolHooks(
+    const protocolResult = await this.executeProtocolHooks(
       runtimeContextInputs,
       blockContextInputs
     );
@@ -542,7 +552,7 @@ export class TransactionExecutionService {
       protocolResult.stateTransitions
     );
 
-    const runtimeResult = this.executeRuntimeMethod(
+    const runtimeResult = await this.executeRuntimeMethod(
       method,
       args,
       runtimeContextInputs

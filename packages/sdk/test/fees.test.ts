@@ -8,6 +8,8 @@ import {
 } from "@proto-kit/module";
 import { PrivateKey } from "o1js";
 import { inject } from "tsyringe";
+import { expectDefined } from "@proto-kit/common";
+
 import { TestingAppChain } from "../src";
 
 @runtimeModule()
@@ -17,7 +19,7 @@ class Faucet extends RuntimeModule<unknown> {
   }
 
   @runtimeMethod()
-  public drip() {
+  public async drip() {
     this.balances.mint(
       new TokenId(0),
       this.transaction.sender.value,
@@ -33,11 +35,12 @@ class Pit extends RuntimeModule<unknown> {
   }
 
   @runtimeMethod()
-  public burn(amount: Balance) {
+  public async burn(amount: Balance) {
     this.balances.burn(TokenId.from(0), this.transaction.sender.value, amount);
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 interface RuntimeModules extends RuntimeModulesRecord {
   Faucet: typeof Faucet;
   Pit: typeof Pit;
@@ -83,12 +86,12 @@ describe("fees", () => {
   });
 
   it("should allow a free faucet transaction", async () => {
-    expect.assertions(0);
+    expect.assertions(2);
 
     const faucet = appChain.runtime.resolve("Faucet");
 
-    const tx = await appChain.transaction(senderKey.toPublicKey(), () => {
-      faucet.drip();
+    const tx = await appChain.transaction(senderKey.toPublicKey(), async () => {
+      await faucet.drip();
     });
 
     await tx.sign();
@@ -103,16 +106,17 @@ describe("fees", () => {
       })
     );
 
-    console.log("balance", balance?.toBigInt());
+    expectDefined(balance);
+    expect(balance.toString()).toBe("1000");
   });
 
   it("should allow burning of tokens with a fixed fee", async () => {
-    expect.assertions(0);
+    expect.assertions(2);
 
     const pit = appChain.runtime.resolve("Pit");
 
-    const tx = await appChain.transaction(senderKey.toPublicKey(), () => {
-      pit.burn(Balance.from(100));
+    const tx = await appChain.transaction(senderKey.toPublicKey(), async () => {
+      await pit.burn(Balance.from(100));
     });
 
     await tx.sign();
@@ -127,6 +131,7 @@ describe("fees", () => {
       })
     );
 
-    console.log("balance", balance?.toBigInt());
+    expectDefined(balance);
+    expect(balance.toString()).toBe("512");
   });
 });
